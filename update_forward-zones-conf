@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+
+### DEFINE SECTIONS (FUNCTION AND CONSTRAINT VALUE).
+
+### 
+readonly _DEFAULT_IGNORE_PATERN='^$|[ ]*#';
+
+### Dump valid config lines
+# $1 config-path
+# $2 ignore-pattern (optional, if not, then using _DEFAULT_IGNORE_PATERN)
+# Return 0 basically. If no arguments is specified, then return -1;
+function dump_valid_config_lines() {
+    [ $# -ge 1 ] || { echo "ERR: At least 1 arguments.">&2; return -1; };
+    local _CONFIG_PATH=$1;
+    
+    [ $# -ge 2 ] && { local _IGNORE_PATERN=$2; } || { local _IGNORE_PATERN=$_DEFAULT_IGNORE_PATERN; };
+    
+    egrep -v "$_IGNORE_PATERN" "$_CONFIG_PATH";
+    return 0;
+}
+
+### Dump config line
+# $1 config-path
+# $2 config-keyname
+# $3 ignore-pattern (optional, if not, then using _DEFAULT_IGNORE_PATERN)
+# Return 0 basically, If no arguments is specified, then return -1;
+function dump_config_line() {
+    [ $# -ge 2  ] || { echo "ERR: At least 2 arguments.">&2; return -1; };
+    local _CONFIG_PATH=$1;
+    local _CONFIG_KEYNAME=$2;
+    
+    dump_valid_config_lines "$_CONFIG_PATH" $3 | egrep "^$_CONFIG_KEYNAME";
+    return 0;
+}
+
+### 
+readonly _DEFAULT_DELIMITER_CHARACTER=', ';
+
+### Parse config value (or values).
+# $1 config-path
+# $2 config-keyname
+# $3 delimiter-character (optional, if not, then using _DEFAULT_DELIMITER_CHARACTER)
+# $4 gnore-pattern (optional, if not, then using _DEFAULT_IGNORE_PATERN)
+function parse_config_value() {
+    [ $# -ge 2  ] || { echo "ERR: At least 2 arguments.">&2; return -1; };
+    local _CONFIG_PATH=$1;
+    local _CONFIG_KEYNAME=$2;
+    
+    local _IFSBK=$IFS;
+    [ $# -ge 3 ] && { IFS=$3; } || { IFS="$_DEFAULT_DELIMITER_CHARACTER"; };
+    
+    for _I in $(dump_config_line "$_CONFIG_PATH" "$_CONFIG_KEYNAME" $4 | sed -e "s|^$_CONFIG_KEYNAME=||"); do
+        echo $_I
+    done;
+    IFS=$_IFSBK;
+    return 0;
+}
+
+### Config filepath (PowerDNS, PowerDNS Recursor)
+readonly _CONFIG_FP_PDNS=/etc/pdns/pdns.conf
+readonly _CONFIG_FP_PDNS_RECURSOR=/etc/pdns-recursor/recursor.conf
+
+### Main
+function main() {
+    ### Check user (root).
+    [ 0 -eq $(id -g) ] || {
+        echo "FATAL: This script must be run by root.">&2;
+        return 1;
+    }
+    
+    ### Check required packages instlled.
+    rpm -q pdns >/dev/null || {
+        echo "FATAL: PowerDNS (pdns) package is not installed.">&2;
+        return 1;
+    }
+    rpm -q pdns-recursor >/dev/null || {
+        echo "FATAL: PowerDNS Recursor (pdns-recursor) package is not installed.">&2;
+        return 1;
+    }
+    
+    ### Get configuration values.
+    declare -a _LOCAL_ADDRESS=($(parse_config_value "$_CONFIG_FP_PDNS" "local-address"));
+    declare _LOCAL_PORT=$(parse_config_value "$_CONFIG_FP_PDNS" "local-port");
+    declare _FORWARD_ZONES_FILE=$(parse_config_value "$_CONFIG_FP_PDNS_RECURSOR" "forward-zones-file");
+    [ -z "$_FORWARD_ZONES_FILE" ] && { 
+        echo "FATAL: PowerDNS Recursor is not configured (forward-zones-file)">&2;
+        return 2;
+    };
+    
+    ### Generate forward-zone-file for all zones by pdnsutil
+    :>"$_FORWARD_ZONES_FILE".new;
+    pdnsutil list-all-zones | sort | while read _ZONENAME; do
+        echo "+$_ZONENAME=${_LOCAL_ADDRESS[0]}:$_LOCAL_PORT">>"$_FORWARD_ZONES_FILE".new;
+    done;
+    
+    LANG=C diff -q "$_FORWARD_ZONES_FILE"{,.new}>/dev/null && {
+        echo "INFO: No changes for all-zones, so need not re-generated and restart pdns-recursor."; 
+    } || {
+        ### Check file manually edited or not.
+        [ -f "$_FORWARD_ZONES_FILE".hash ] && {
+            LANG=C md5sum -c $_FORWARD_ZONES_FILE".hash" >/dev/null;
+            [ $? -eq 0 ] || {
+                echo "ERR: \"_FORWARD_ZONES_FILE\" might be edited manually.">&2;
+                return 4;
+            }
+        }
+
+        ### Replace new file.
+        cp -v -p -f "$_FORWARD_ZONES_FILE"{,.old} >/dev/null;
+        mv -v -f "$_FORWARD_ZONES_FILE"{.new,} >/dev/null;
+        
+        md5sum "$_FORWARD_ZONES_FILE">"$_FORWARD_ZONES_FILE".hash;
+    
+        ### Print message to reload pdns-recursor.
+        echo "NOTICE: \"forward-zones.conf\" was generated successfully, please restart pdns-recursor.";
+    }
+
+    ### Clean temporary files.
+    rm -f "$_FORWARD_ZONES_FILE".new>/dev/null;
+    
+    ### End
+    return 0;
+}
+
+### MAIN
+
+_LHOME=$(dirname "$0")
+_LNAME=$(basename "$0")
+_TITLE=$(basename "$0" .sh)
+_LPATH=$(cd "$_LHOME"; pwd)
+
+main "$@";
+exit $?;
+
+
