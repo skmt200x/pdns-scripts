@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 ### PowerDNS automation script
+#
 
 ### DEFINE SECTIONS (FUNCTION AND CONSTRAINT VALUE).
 
